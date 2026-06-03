@@ -33,6 +33,7 @@ test-results
 storybook-static
 .metacoding
 .omc
+.playwright-mcp
 
 # Beads / Dolt files (added by bd init)
 .dolt/
