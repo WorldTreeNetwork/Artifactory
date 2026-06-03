@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "artifactory",
+  "project_id": "0da9fda7-4c62-4b5d-9d14-f52974b10ea0"
+}
