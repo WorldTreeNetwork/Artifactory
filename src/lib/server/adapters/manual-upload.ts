@@ -15,7 +15,17 @@ export const manualUploadAdapter: Adapter = {
 			name: 'output',
 			description: 'The uploaded asset',
 			mimeTypes: ['*/*'],
-			required: true
+			required: true,
+			schema: {
+				type: 'object',
+				properties: {
+					id: { type: 'string', description: 'Asset ID' },
+					mimeType: { type: 'string', description: 'MIME type of the asset' },
+					size: { type: 'number', description: 'File size in bytes' },
+					storageKey: { type: 'string', description: 'Storage location key' },
+					content: { type: 'string', description: 'Inline text content (if text asset)' }
+				}
+			}
 		}
 	],
 	configSchema: {

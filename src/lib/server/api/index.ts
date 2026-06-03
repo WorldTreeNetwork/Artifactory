@@ -4,6 +4,7 @@ import { storageRoutes } from './routes/storage';
 import { pipelineRoutes } from './routes/pipelines';
 import { adapterRoutes } from './routes/adapters';
 import { runRoutes } from './routes/runs';
+import { schemaRoutes } from './routes/schemas';
 
 export const app = new Elysia({ prefix: '/api' })
 	.get('/health', () => ({ status: 'ok' }))
@@ -11,6 +12,7 @@ export const app = new Elysia({ prefix: '/api' })
 	.use(storageRoutes)
 	.use(pipelineRoutes)
 	.use(adapterRoutes)
-	.use(runRoutes);
+	.use(runRoutes)
+	.use(schemaRoutes);
 
 export type App = typeof app;

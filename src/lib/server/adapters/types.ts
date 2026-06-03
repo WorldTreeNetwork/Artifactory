@@ -9,6 +9,7 @@ export interface PortDefinition {
 	description: string;
 	mimeTypes: string[];
 	required: boolean;
+	schema?: Record<string, unknown>;
 }
 
 export interface LogEntry {

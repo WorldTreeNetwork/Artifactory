@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { Viewport, StepTile, DetailDrawer } from '$lib/components/pipeline';
+	import { Viewport, StepTile, DetailDrawer, WireLayer, Minimap, getPortTypeColor } from '$lib/components/pipeline';
 	import { computeLayout } from '$lib/layout/tiling';
 
 	let { data } = $props();
@@ -25,6 +25,21 @@
 		localNodes = pipeline.nodes;
 	});
 
+	// Container element for port hit-testing and coordinate conversion
+	let viewportContainerEl = $state<HTMLElement | undefined>(undefined);
+
+	// Viewport pixel dimensions for minimap viewport indicator
+	let viewportWidth = $state(0);
+	let viewportHeight = $state(0);
+
+	// Mutable local edges (so new connections reflect immediately)
+	let localEdges: typeof pipeline.edges = $state([]);
+
+	// Keep localEdges in sync with pipeline data
+	$effect(() => {
+		localEdges = pipeline.edges;
+	});
+
 	// Layout computation
 	const layout = $derived(
 		computeLayout(
@@ -32,7 +47,7 @@
 				id: n.id,
 				adapterId: n.adapterId
 			})),
-			pipeline.edges.map((e: { sourceNodeId: string; targetNodeId: string }) => ({
+			localEdges.map((e: { sourceNodeId: string; targetNodeId: string }) => ({
 				sourceNodeId: e.sourceNodeId,
 				targetNodeId: e.targetNodeId
 			}))
@@ -43,6 +58,281 @@
 	const positionMap = $derived(
 		new Map(layout.positions.map((p) => [p.nodeId, p]))
 	);
+
+	// Category map for minimap coloring: nodeId -> adapter category
+	const categoryMap = $derived(
+		Object.fromEntries(
+			localNodes
+				.filter((n: { id: string; adapter: { category: string } | null }) => n.adapter?.category)
+				.map((n: { id: string; adapter: { category: string } }) => [n.id, n.adapter.category])
+		)
+	);
+
+	// Drag-to-connect state
+	interface DragState {
+		active: boolean;
+		sourceNodeId: string;
+		sourcePortName: string;
+		sourceType: 'input' | 'output';
+		sourceElement: HTMLElement | null;
+		mouseX: number;
+		mouseY: number;
+	}
+
+	let dragState = $state<DragState>({
+		active: false,
+		sourceNodeId: '',
+		sourcePortName: '',
+		sourceType: 'output',
+		sourceElement: null,
+		mouseX: 0,
+		mouseY: 0
+	});
+
+	interface PortDef {
+		name: string;
+		mimeTypes: string[];
+	}
+
+	interface AdapterPorts {
+		inputPorts: PortDef[];
+		outputPorts: PortDef[];
+	}
+
+	// Build a lookup: nodeId -> adapter ports, for compatibility checks
+	const adapterPortMap = $derived(
+		new Map<string, AdapterPorts>(
+			localNodes.map((n: { id: string; adapter: { inputPorts: PortDef[]; outputPorts: PortDef[] } | null }) => [
+				n.id,
+				{
+					inputPorts: n.adapter?.inputPorts ?? [],
+					outputPorts: n.adapter?.outputPorts ?? []
+				}
+			])
+		)
+	);
+
+	// Check if two sets of mime types are compatible (any overlap, or either has */*)
+	function mimesCompatible(a: string[], b: string[]): boolean {
+		if (a.includes('*/*') || b.includes('*/*')) return true;
+		return a.some((ma) => b.some((mb) => ma === mb || ma.split('/')[0] + '/*' === mb || mb.split('/')[0] + '/*' === ma));
+	}
+
+	// Derive compatible target ports while dragging
+	const compatiblePorts = $derived((): Array<{ nodeId: string; portName: string }> => {
+		if (!dragState.active) return [];
+
+		const srcAdapterPorts = adapterPortMap.get(dragState.sourceNodeId);
+		if (!srcAdapterPorts) return [];
+
+		const results: Array<{ nodeId: string; portName: string }> = [];
+
+		for (const [nodeId, ports] of adapterPortMap) {
+			// Must be a different node
+			if (nodeId === dragState.sourceNodeId) continue;
+
+			if (dragState.sourceType === 'output') {
+				// Source is output → compatible targets are inputs
+				const srcMimes = srcAdapterPorts.outputPorts.find((p: { name: string }) => p.name === dragState.sourcePortName)?.mimeTypes ?? [];
+				for (const port of ports.inputPorts) {
+					if (mimesCompatible(srcMimes, port.mimeTypes)) {
+						results.push({ nodeId, portName: port.name });
+					}
+				}
+			} else {
+				// Source is input → compatible targets are outputs
+				const srcMimes = srcAdapterPorts.inputPorts.find((p: { name: string }) => p.name === dragState.sourcePortName)?.mimeTypes ?? [];
+				for (const port of ports.outputPorts) {
+					if (mimesCompatible(srcMimes, port.mimeTypes)) {
+						results.push({ nodeId, portName: port.name });
+					}
+				}
+			}
+		}
+
+		return results;
+	});
+
+	// Convert viewport client coordinates to content coordinates
+	function clientToContent(clientX: number, clientY: number): { x: number; y: number } {
+		if (!viewportContainerEl) return { x: clientX, y: clientY };
+		const rect = viewportContainerEl.getBoundingClientRect();
+		return {
+			x: (clientX - rect.left) / zoom,
+			y: (clientY - rect.top) / zoom
+		};
+	}
+
+	// Pointer event handlers for drag-to-connect
+	function handlePointerDown(e: PointerEvent) {
+		// Only handle primary button; ignore pan modifiers (handled by Viewport)
+		if (e.button !== 0 || e.altKey || e.metaKey || e.shiftKey) return;
+
+		const target = e.target as HTMLElement;
+		const portDot = target.closest('[data-port-id]') as HTMLElement | null;
+		if (!portDot) return;
+
+		const portType = portDot.getAttribute('data-port-type') as 'input' | 'output' | null;
+		const nodeId = portDot.getAttribute('data-port-node');
+		const portName = portDot.getAttribute('data-port-name');
+
+		if (!portType || !nodeId || !portName) return;
+
+		e.preventDefault();
+		e.stopPropagation();
+
+		const pos = clientToContent(e.clientX, e.clientY);
+
+		dragState = {
+			active: true,
+			sourceNodeId: nodeId,
+			sourcePortName: portName,
+			sourceType: portType,
+			sourceElement: portDot,
+			mouseX: pos.x,
+			mouseY: pos.y
+		};
+
+		// Capture pointer on the viewport container so we get moves outside tiles
+		viewportContainerEl?.setPointerCapture(e.pointerId);
+	}
+
+	function handlePointerMove(e: PointerEvent) {
+		if (!dragState.active) return;
+		const pos = clientToContent(e.clientX, e.clientY);
+		dragState.mouseX = pos.x;
+		dragState.mouseY = pos.y;
+	}
+
+	async function handlePointerUp(e: PointerEvent) {
+		if (!dragState.active) return;
+
+		viewportContainerEl?.releasePointerCapture(e.pointerId);
+
+		const target = e.target as HTMLElement;
+		const portDot = target.closest('[data-port-id]') as HTMLElement | null;
+
+		if (portDot) {
+			const targetType = portDot.getAttribute('data-port-type') as 'input' | 'output' | null;
+			const targetNodeId = portDot.getAttribute('data-port-node');
+			const targetPortName = portDot.getAttribute('data-port-name');
+
+			if (targetType && targetNodeId && targetPortName && targetNodeId !== dragState.sourceNodeId) {
+				// Determine source/target based on port types
+				let sourceNodeId: string;
+				let sourcePortName: string;
+				let targetNodeIdFinal: string;
+				let targetPortNameFinal: string;
+
+				if (dragState.sourceType === 'output' && targetType === 'input') {
+					sourceNodeId = dragState.sourceNodeId;
+					sourcePortName = dragState.sourcePortName;
+					targetNodeIdFinal = targetNodeId;
+					targetPortNameFinal = targetPortName;
+				} else if (dragState.sourceType === 'input' && targetType === 'output') {
+					sourceNodeId = targetNodeId;
+					sourcePortName = targetPortName;
+					targetNodeIdFinal = dragState.sourceNodeId;
+					targetPortNameFinal = dragState.sourcePortName;
+				} else {
+					// Same type — incompatible
+					dragState = { ...dragState, active: false, sourceElement: null };
+					return;
+				}
+
+				// Check compatibility
+				const compat = compatiblePorts();
+				const isCompatible = compat.some(
+					(p) =>
+						(dragState.sourceType === 'output'
+							? p.nodeId === targetNodeIdFinal && p.portName === targetPortNameFinal
+							: p.nodeId === sourceNodeId && p.portName === sourcePortName)
+				);
+
+				if (isCompatible) {
+					await createEdge(sourceNodeId, sourcePortName, targetNodeIdFinal, targetPortNameFinal);
+				}
+			}
+		}
+
+		dragState = {
+			active: false,
+			sourceNodeId: '',
+			sourcePortName: '',
+			sourceType: 'output',
+			sourceElement: null,
+			mouseX: 0,
+			mouseY: 0
+		};
+	}
+
+	async function createEdge(
+		sourceNodeId: string,
+		sourcePortName: string,
+		targetNodeId: string,
+		targetPortName: string
+	) {
+		const pipelineId = page.params.id;
+		const res = await fetch(`/api/pipelines/${pipelineId}/edges`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ sourceNodeId, sourcePortName, targetNodeId, targetPortName })
+		});
+		if (res.ok) {
+			const edge = await res.json();
+			localEdges = [...localEdges, edge];
+		}
+	}
+
+	// Port color map for WireLayer: portId -> CSS color variable
+	const portColors = $derived(
+		Object.fromEntries(
+			localNodes.flatMap((n: { id: string; adapter: { outputPorts: Array<{ name: string; mimeTypes: string[] }> } | null }) =>
+				(n.adapter?.outputPorts ?? []).map((p: { name: string; mimeTypes: string[] }) => [
+					`${n.id}-output-${p.name}`,
+					`var(--color-port-${getPortTypeColor(p.mimeTypes)})`
+				])
+			)
+		)
+	);
+
+	// Drag preview port color
+	const dragPortColor = $derived((): string => {
+		if (!dragState.active || !dragState.sourceElement) return 'var(--color-port-any)';
+		const nodeId = dragState.sourceNodeId;
+		const portName = dragState.sourcePortName;
+		const portType = dragState.sourceType;
+		const ports = adapterPortMap.get(nodeId);
+		if (!ports) return 'var(--color-port-any)';
+		const portList = portType === 'output' ? ports.outputPorts : ports.inputPorts;
+		const port = portList.find((p: { name: string }) => p.name === portName);
+		if (!port) return 'var(--color-port-any)';
+		return `var(--color-port-${getPortTypeColor(port.mimeTypes)})`;
+	});
+
+	// Apply/remove highlight class on compatible port dots while dragging
+	$effect(() => {
+		if (!viewportContainerEl) return;
+
+		// Clear all highlights first
+		const highlighted = viewportContainerEl.querySelectorAll('.port-dot--compatible');
+		highlighted.forEach((el) => el.classList.remove('port-dot--compatible'));
+
+		if (!dragState.active) return;
+
+		const targetPortType = dragState.sourceType === 'output' ? 'input' : 'output';
+		for (const cp of compatiblePorts()) {
+			const portId = `${cp.nodeId}-${targetPortType}-${cp.portName}`;
+			const el = viewportContainerEl.querySelector(`[data-port-id="${portId}"]`);
+			el?.classList.add('port-dot--compatible');
+		}
+
+		return () => {
+			if (!viewportContainerEl) return;
+			const toClean = viewportContainerEl.querySelectorAll('.port-dot--compatible');
+			toClean.forEach((el) => el.classList.remove('port-dot--compatible'));
+		};
+	});
 
 	// Selected tile state
 	let selectedNodeId = $state<string | null>(null);
@@ -108,15 +398,106 @@
 		archived: 'background-color: var(--color-bg-secondary); color: var(--color-text-muted)'
 	};
 
-	// Run pipeline (placeholder — calls POST /api/pipelines/:id/runs)
-	async function runPipeline() {
-		const id = page.params.id;
-		const res = await fetch(`/api/pipelines/${id}/runs`, { method: 'POST', body: JSON.stringify({ trigger: 'manual' }), headers: { 'Content-Type': 'application/json' } });
-		if (res.ok) {
+	// Active run state for live status overlay
+	interface NodeRunInfo {
+		nodeId: string;
+		status: string;
+		durationMs?: number;
+		error?: string | null;
+	}
+
+	interface ActiveRun {
+		id: string;
+		status: string;
+		startedAt: string | null;
+		completedAt: string | null;
+		nodeRuns: NodeRunInfo[];
+	}
+
+	let activeRun = $state<ActiveRun | null>(null);
+	let pollInterval = $state<ReturnType<typeof setInterval> | null>(null);
+
+	// Node status map derived from active run
+	const nodeStatusMap = $derived<Record<string, string>>(
+		activeRun?.nodeRuns
+			? Object.fromEntries(activeRun.nodeRuns.map((nr) => [nr.nodeId, nr.status]))
+			: {}
+	);
+
+	// Node duration map derived from active run
+	const nodeDurationMap = $derived<Record<string, number>>(
+		activeRun?.nodeRuns
+			? Object.fromEntries(
+					activeRun.nodeRuns
+						.filter((nr) => nr.durationMs !== undefined)
+						.map((nr) => [nr.nodeId, nr.durationMs!])
+				)
+			: {}
+	);
+
+	// Node error map derived from active run
+	const nodeErrorMap = $derived<Record<string, string>>(
+		activeRun?.nodeRuns
+			? Object.fromEntries(
+					activeRun.nodeRuns
+						.filter((nr) => nr.error)
+						.map((nr) => [nr.nodeId, nr.error!])
+				)
+			: {}
+	);
+
+	async function pollRun(runId: string) {
+		try {
+			const res = await fetch(`/api/runs/${runId}`);
+			if (!res.ok) return;
 			const run = await res.json();
-			goto(`/pipelines/${id}/runs/${run.id}`);
+			activeRun = run;
+			// Stop polling when run reaches terminal state
+			if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
+				stopPolling();
+			}
+		} catch {
+			// Network error — keep polling
 		}
 	}
+
+	function stopPolling() {
+		if (pollInterval !== null) {
+			clearInterval(pollInterval);
+			pollInterval = null;
+		}
+	}
+
+	async function cancelRun() {
+		if (!activeRun) return;
+		await fetch(`/api/runs/${activeRun.id}/cancel`, { method: 'POST' });
+		await pollRun(activeRun.id);
+		stopPolling();
+	}
+
+	// Run pipeline — POST to API, then start live polling
+	async function runPipeline() {
+		const id = page.params.id;
+		const res = await fetch(`/api/pipelines/${id}/run`, {
+			method: 'POST',
+			body: JSON.stringify({ trigger: 'manual' }),
+			headers: { 'Content-Type': 'application/json' }
+		});
+		if (res.ok) {
+			const data = await res.json();
+			const runId = data.runId;
+			// Fetch initial run state immediately
+			await pollRun(runId);
+			// Poll every second while active
+			stopPolling();
+			pollInterval = setInterval(() => pollRun(runId), 1000);
+		}
+	}
+
+	// Clean up polling on destroy
+	$effect(() => {
+		return () => stopPolling();
+	});
 </script>
 
 <div class="editor-shell">
@@ -164,6 +545,9 @@
 
 	<!-- Viewport fills remaining space -->
 	<div
+		bind:this={viewportContainerEl}
+		bind:clientWidth={viewportWidth}
+		bind:clientHeight={viewportHeight}
 		class="viewport-container"
 		role="presentation"
 		onclick={(e) => {
@@ -172,6 +556,10 @@
 				selectedNodeId = null;
 			}
 		}}
+		onpointerdown={handlePointerDown}
+		onpointermove={handlePointerMove}
+		onpointerup={handlePointerUp}
+		onpointercancel={handlePointerUp}
 	>
 		<Viewport bind:zoom bind:pan>
 			{#if localNodes.length === 0}
@@ -202,7 +590,78 @@
 					{/if}
 				{/each}
 			{/if}
+
+			<!-- Wire layer renders edges -->
+			<WireLayer
+				edges={localEdges}
+				positions={layout.positions}
+				container={viewportContainerEl}
+				{zoom}
+				{portColors}
+			/>
+
+			<!-- Preview wire while dragging -->
+			{#if dragState.active && dragState.sourceElement}
+				{@const srcPortId = `${dragState.sourceNodeId}-${dragState.sourceType}-${dragState.sourcePortName}`}
+				{@const srcEl = viewportContainerEl?.querySelector(`[data-port-id="${srcPortId}"]`)}
+				{#if srcEl && viewportContainerEl}
+					{@const containerRect = viewportContainerEl.getBoundingClientRect()}
+					{@const srcRect = (srcEl as HTMLElement).getBoundingClientRect()}
+					{@const sx = (srcRect.left + srcRect.width / 2 - containerRect.left) / zoom}
+					{@const sy = (srcRect.top + srcRect.height / 2 - containerRect.top) / zoom}
+					{@const tx = dragState.mouseX}
+					{@const ty = dragState.mouseY}
+					{@const dx = Math.abs(tx - sx)}
+					{@const cpx = Math.max(40, dx * 0.4)}
+					{@const d = dragState.sourceType === 'output'
+						? `M ${sx},${sy} C ${sx + cpx},${sy} ${tx - cpx},${ty} ${tx},${ty}`
+						: `M ${tx},${ty} C ${tx + cpx},${ty} ${sx - cpx},${sy} ${sx},${sy}`}
+					<svg
+						aria-hidden="true"
+						style="pointer-events: none; overflow: visible; position: absolute; inset: 0; width: 100%; height: 100%; z-index: 20;"
+					>
+						<path
+							{d}
+							fill="none"
+							stroke={dragPortColor()}
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-dasharray="6 4"
+							opacity="0.7"
+						/>
+					</svg>
+				{/if}
+			{/if}
 		</Viewport>
+
+		<!-- Compatible port highlights overlay (CSS class on port dots) -->
+		{#if dragState.active}
+			{#each compatiblePorts() as cp}
+				{@const portType = dragState.sourceType === 'output' ? 'input' : 'output'}
+				{@const portId = `${cp.nodeId}-${portType}-${cp.portName}`}
+				{@const portEl = viewportContainerEl?.querySelector(`[data-port-id="${portId}"]`)}
+				{#if portEl}
+					<!-- We set class via effect instead of here — see $effect below -->
+				{/if}
+			{/each}
+		{/if}
+
+		<!-- Minimap overview -->
+		<Minimap
+			positions={layout.positions}
+			edges={localEdges.map((e: { sourceNodeId: string; targetNodeId: string }) => ({
+				sourceNodeId: e.sourceNodeId,
+				targetNodeId: e.targetNodeId
+			}))}
+			totalWidth={layout.totalWidth}
+			totalHeight={layout.totalHeight}
+			{viewportWidth}
+			{viewportHeight}
+			{zoom}
+			{pan}
+			{categoryMap}
+			onnavigate={(newPan) => { pan = newPan; }}
+		/>
 	</div>
 
 	<!-- Detail Drawer -->
@@ -401,5 +860,14 @@
 	/* Tile wrapper — absolutely positioned inside viewport */
 	.tile-wrapper {
 		pointer-events: auto;
+	}
+
+	/* Compatible port highlight during drag-to-connect */
+	:global(.port-dot--compatible) {
+		box-shadow: 0 0 0 3px var(--color-border-focus), 0 0 8px 2px var(--color-border-focus);
+		transform: scale(1.6);
+		transition:
+			box-shadow var(--duration-fast) var(--easing-default),
+			transform var(--duration-fast) var(--easing-default);
 	}
 </style>

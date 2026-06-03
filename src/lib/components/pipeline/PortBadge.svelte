@@ -33,6 +33,7 @@
 		description: string;
 		mimeTypes: string[];
 		required: boolean;
+		schema?: Record<string, unknown>;
 	}
 
 	interface Props {
@@ -46,6 +47,15 @@
 	let { nodeId, port, type, lod, connected = false }: Props = $props();
 
 	const portType = $derived(getPortTypeColor(port.mimeTypes));
+
+	const schemaProperties = $derived((): Array<{ key: string; type: string }> => {
+		const props = port.schema?.properties;
+		if (!props || typeof props !== 'object') return [];
+		return Object.entries(props as Record<string, Record<string, unknown>>).map(([key, def]) => ({
+			key,
+			type: typeof def.type === 'string' ? def.type : 'unknown'
+		}));
+	});
 
 	// Dot color: connected or required/optional logic
 	const dotStyle = $derived((): string => {
@@ -122,6 +132,16 @@
 				</span>
 			{/each}
 		{/if}
+		{#if schemaProperties().length > 0}
+			<div class="schema-fields" class:schema-fields--output={type === 'output'}>
+				{#each schemaProperties() as field}
+					<span class="schema-field">
+						<span class="schema-field-name">{field.key}</span>
+						<span class="schema-field-type">{field.type}</span>
+					</span>
+				{/each}
+			</div>
+		{/if}
 	</div>
 {/if}
 
@@ -171,5 +191,38 @@
 		padding: 1px 4px;
 		font-family: var(--font-family-mono, monospace);
 		white-space: nowrap;
+	}
+
+	.schema-fields {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--spacing-1);
+		width: 100%;
+		padding-top: 2px;
+	}
+
+	.schema-fields--output {
+		justify-content: flex-end;
+	}
+
+	.schema-field {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		font-size: 0.6rem;
+		font-family: var(--font-family-mono, monospace);
+		color: var(--color-text-muted);
+	}
+
+	.schema-field-name {
+		font-weight: 400;
+	}
+
+	.schema-field-type {
+		background-color: var(--color-bg-secondary);
+		color: var(--color-text-secondary);
+		border-radius: var(--radius-sm);
+		padding: 0 3px;
+		font-size: 0.58rem;
 	}
 </style>

@@ -16,6 +16,17 @@ export interface TilePosition {
 	row: number;
 	width: number;
 	height: number;
+	group?: string; // group ID if this tile is part of a fan-out group
+}
+
+export interface GroupPosition {
+	id: string;
+	column: number;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	nodeIds: string[];
 }
 
 export interface LayoutConfig {
@@ -27,6 +38,7 @@ export interface LayoutConfig {
 
 export interface LayoutResult {
 	positions: TilePosition[];
+	groups: GroupPosition[];
 	totalWidth: number;
 	totalHeight: number;
 	columns: number;
@@ -126,7 +138,7 @@ export function computeLayout(
 	const rowGap = config?.rowGap ?? 24;
 
 	if (nodes.length === 0) {
-		return { positions: [], totalWidth: 0, totalHeight: 0, columns: 0 };
+		return { positions: [], groups: [], totalWidth: 0, totalHeight: 0, columns: 0 };
 	}
 
 	const topoOrder = topoSort(nodes, edges);
@@ -166,5 +178,65 @@ export function computeLayout(
 		numColumns === 0 ? 0 : numColumns * tileWidth + Math.max(0, numColumns - 1) * columnGap;
 	const totalHeight = tallestColumnPx;
 
-	return { positions, totalWidth, totalHeight, columns: numColumns };
+	// Detect fan-out groups: nodes that share a column AND have a common single predecessor.
+	// Build predecessor map: nodeId -> Set of sourceNodeIds
+	const predecessorMap = new Map<string, Set<string>>();
+	for (const node of nodes) predecessorMap.set(node.id, new Set());
+	for (const edge of edges) {
+		predecessorMap.get(edge.targetNodeId)?.add(edge.sourceNodeId);
+	}
+
+	// positionByNodeId for quick bounding-box lookup
+	const positionByNodeId = new Map<string, TilePosition>();
+	for (const pos of positions) positionByNodeId.set(pos.nodeId, pos);
+
+	const groups: GroupPosition[] = [];
+	let groupCounter = 0;
+
+	for (const [col, ids] of columnGroups) {
+		if (ids.length < 2) continue;
+
+		// Find sets of nodes in this column that all share exactly one common predecessor.
+		// Group them by that shared predecessor.
+		const byPredecessor = new Map<string, string[]>();
+		for (const id of ids) {
+			const preds = predecessorMap.get(id);
+			if (preds && preds.size === 1) {
+				const pred = [...preds][0];
+				if (!byPredecessor.has(pred)) byPredecessor.set(pred, []);
+				byPredecessor.get(pred)!.push(id);
+			}
+		}
+
+		for (const [, memberIds] of byPredecessor) {
+			if (memberIds.length < 2) continue;
+
+			const groupId = `group-${groupCounter++}`;
+
+			// Mark each member tile with this group
+			for (const id of memberIds) {
+				const pos = positionByNodeId.get(id);
+				if (pos) pos.group = groupId;
+			}
+
+			// Compute bounding box from member tile positions
+			const memberPositions = memberIds.map((id) => positionByNodeId.get(id)!);
+			const minX = Math.min(...memberPositions.map((p) => p.x));
+			const minY = Math.min(...memberPositions.map((p) => p.y));
+			const maxX = Math.max(...memberPositions.map((p) => p.x + p.width));
+			const maxY = Math.max(...memberPositions.map((p) => p.y + p.height));
+
+			groups.push({
+				id: groupId,
+				column: col,
+				x: minX,
+				y: minY,
+				width: maxX - minX,
+				height: maxY - minY,
+				nodeIds: memberIds
+			});
+		}
+	}
+
+	return { positions, groups, totalWidth, totalHeight, columns: numColumns };
 }
