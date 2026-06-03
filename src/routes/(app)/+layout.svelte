@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { theme, resolvedTheme, toggleTheme } from '$lib/stores/theme';
+	import { themeStore } from '$lib/stores/theme.svelte';
 
 	let { children } = $props();
 
@@ -100,11 +100,11 @@
 
 			<button
 				class="nav-link theme-toggle"
-				onclick={toggleTheme}
-				title="Toggle theme ({resolvedTheme === 'dark' ? 'dark' : 'light'} mode)"
+				onclick={() => themeStore.toggleTheme()}
+				title="Toggle theme ({themeStore.resolvedTheme === 'dark' ? 'dark' : 'light'} mode)"
 				aria-label="Toggle theme"
 			>
-				{#if resolvedTheme === 'dark'}
+				{#if themeStore.resolvedTheme === 'dark'}
 					<!-- Moon icon -->
 					<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
 						<path d="M17 13A7 7 0 0 1 7 3a7 7 0 1 0 10 10z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>

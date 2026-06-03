@@ -1,0 +1,5 @@
+- generic [ref=e4]:
+  - heading "Artifactory" [level=1] [ref=e5]
+  - paragraph [ref=e6]: Asset pipeline system
+  - link "Open Pipeline Editor" [ref=e7] [cursor=pointer]:
+    - /url: /pipelines
