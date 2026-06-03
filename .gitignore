@@ -26,5 +26,10 @@ test-results
 # SQLite
 *.db
 
+# Local asset storage
+/storage
+
 *storybook.log
 storybook-static
+.metacoding
+.omc
