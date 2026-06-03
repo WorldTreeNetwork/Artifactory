@@ -4,6 +4,17 @@
 - **Package Manager**: bun
 - **Add-ons**: prettier, eslint, vitest, playwright, tailwindcss, sveltekit-adapter, drizzle, better-auth, mdsvex, storybook, mcp
 
+## API
+
+- **ElysiaJS** is the API framework, mounted at `/api` via a SvelteKit catch-all route (`src/routes/api/[...slugs]/+server.ts`).
+- The Elysia app is defined in `src/lib/server/api/index.ts` and exports `App` type for end-to-end type safety.
+- **Eden Treaty** (`src/lib/api.ts`) is the type-safe client used on the frontend to call the API. Always use it instead of raw `fetch` for API calls.
+- Add new API routes by chaining onto the Elysia app in `src/lib/server/api/` — do not create separate SvelteKit `+server.ts` API routes.
+
+## Database
+
+- **Always use migrations**, never `drizzle-kit push`. Use `bun run db:generate` to create migrations and `bun run db:migrate` to apply them.
+
 ---
 
 You are able to use the Svelte MCP server, where you have access to comprehensive Svelte 5 and SvelteKit documentation. Here's how to use the available tools effectively:
