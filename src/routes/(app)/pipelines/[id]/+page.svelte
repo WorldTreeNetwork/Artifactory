@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { Viewport, StepTile, DetailDrawer, WireLayer, Minimap, getPortTypeColor } from '$lib/components/pipeline';
+	import { Viewport, StepTile, DetailDrawer, WireLayer, Minimap, CommandPalette, getPortTypeColor } from '$lib/components/pipeline';
 	import { computeLayout } from '$lib/layout/tiling';
 
 	let { data } = $props();
@@ -391,6 +391,54 @@
 
 	const zoomPercent = $derived(Math.round(zoom * 100));
 
+	// Command palette state
+	let paletteOpen = $state(false);
+	const adapters = $derived(data.adapters ?? []);
+
+	async function handleAdapterSelect(adapterId: string) {
+		const pipelineId = page.params.id;
+		const res = await fetch(`/api/pipelines/${pipelineId}/nodes`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ adapterId })
+		});
+		if (res.ok) {
+			const node = await res.json();
+			localNodes = [...localNodes, node];
+
+			// Auto-connect: if there's a selected node, try to wire output→input
+			if (selectedNodeId) {
+				const sourceNode = localNodes.find((n: { id: string }) => n.id === selectedNodeId);
+				if (sourceNode?.adapter?.outputPorts?.length && node.adapter?.inputPorts?.length) {
+					for (const outPort of sourceNode.adapter.outputPorts) {
+						for (const inPort of node.adapter.inputPorts) {
+							const compatible =
+								outPort.mimeTypes.includes('*/*') ||
+								inPort.mimeTypes.includes('*/*') ||
+								outPort.mimeTypes.some((m: string) => inPort.mimeTypes.includes(m));
+							if (compatible) {
+								await createEdge(sourceNode.id, outPort.name, node.id, inPort.name);
+								break;
+							}
+						}
+						break; // only auto-connect first compatible pair
+					}
+				}
+			}
+
+			selectedNodeId = node.id;
+		}
+		paletteOpen = false;
+	}
+
+	// Ctrl+K / Cmd+K to open palette
+	function handleKeydown(e: KeyboardEvent) {
+		if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+			e.preventDefault();
+			paletteOpen = !paletteOpen;
+		}
+	}
+
 	// Status badge style
 	const STATUS_STYLES: Record<string, string> = {
 		draft: 'background-color: var(--color-bg-secondary); color: var(--color-text-secondary)',
@@ -499,6 +547,8 @@
 		return () => stopPolling();
 	});
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="editor-shell">
 	<!-- Toolbar -->
@@ -671,6 +721,12 @@
 		adapter={selectedAdapter}
 		onupdate={handleNodeUpdate}
 		ondelete={handleNodeDelete}
+	/>
+
+	<CommandPalette
+		bind:open={paletteOpen}
+		{adapters}
+		onselect={handleAdapterSelect}
 	/>
 </div>
 
